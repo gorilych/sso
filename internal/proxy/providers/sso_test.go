@@ -102,6 +102,11 @@ func TestSSOProviderDefaults(t *testing.T) {
 	testutil.Equal(t, fmt.Sprintf("%s/refresh", base), data.RefreshURL.String())
 	testutil.Equal(t, fmt.Sprintf("%s/validate", base), data.ValidateURL.String())
 	testutil.Equal(t, fmt.Sprintf("%s/profile", base), data.ProfileURL.String())
+	if data.ProxyProviderURL.String() == "" {
+		data.ProxyProviderURL = data.ProviderURL
+	}
+	proxybase := fmt.Sprintf("%s://%s", data.ProxyProviderURL.Scheme, data.ProxyProviderURL.Host)
+	testutil.Equal(t, fmt.Sprintf("%s/redeem", proxybase), data.ProxyRedeemURL.String())
 }
 
 type redeemResponse struct {
@@ -203,13 +208,15 @@ func TestSSOProviderGroups(t *testing.T) {
 	}
 }
 
-func TestSSOProviderGetEmailAddress(t *testing.T) {
+func TestSSOProviderRedeem(t *testing.T) {
 	testCases := []struct {
-		Name            string
-		Code            string
-		ExpectedError   string
-		RedeemResponse  *redeemResponse
-		ProfileResponse *profileResponse
+		Name                    string
+		Code                    string
+		ExpectedError           string
+		RedeemResponse          *redeemResponse
+		RedeemResponseInternal  *redeemResponse
+		ProfileResponse         *profileResponse
+		ProfileResponseInternal *profileResponse
 	}{
 		{
 			Name:          "redeem fails without code",
@@ -229,9 +236,19 @@ func TestSSOProviderGetEmailAddress(t *testing.T) {
 				RefreshToken: "refresh12345",
 				Email:        "michael.bland@gsa.gov",
 			},
+			RedeemResponseInternal: &redeemResponse{
+				AccessToken:  "i1234",
+				ExpiresIn:    10,
+				RefreshToken: "refreshinternal12345",
+				Email:        "michael.bland@gsa.gov",
+			},
 			ProfileResponse: &profileResponse{
 				Email:  "michael.bland@gsa.gov",
 				Groups: []string{"core@gsa.gov"},
+			},
+			ProfileResponseInternal: &profileResponse{
+				Email:  "michael.bland@gsa.gov",
+				Groups: []string{"internal@gsa.gov"},
 			},
 		},
 	}
@@ -240,29 +257,38 @@ func TestSSOProviderGetEmailAddress(t *testing.T) {
 			p := newSSOProvider()
 
 			var redeemServer *httptest.Server
+			var redeemServerInternal *httptest.Server
 			// set up redemption resource
 			if tc.RedeemResponse != nil {
 				body, err := json.Marshal(tc.RedeemResponse)
+				bodyInternal, err := json.Marshal(tc.RedeemResponseInternal)
 				testutil.Equal(t, nil, err)
 				p.RedeemURL, redeemServer = newTestServer(http.StatusOK, body)
-				p.ProxyRedeemURL, redeemServer = newTestServer(http.StatusOK, body)
+				p.ProxyRedeemURL, redeemServerInternal = newTestServer(http.StatusOK, bodyInternal)
 			} else {
 				p.RedeemURL, redeemServer = newCodeTestServer(400)
-				p.ProxyRedeemURL, redeemServer = newCodeTestServer(400)
+				p.ProxyRedeemURL, redeemServerInternal = newCodeTestServer(500)
 			}
 			defer redeemServer.Close()
+			defer redeemServerInternal.Close()
 
 			var profileServer *httptest.Server
+			var profileServerInternal *httptest.Server
 			if tc.ProfileResponse != nil {
 				body, err := json.Marshal(tc.ProfileResponse)
+				bodyInternal, err := json.Marshal(tc.ProfileResponseInternal)
 				testutil.Equal(t, nil, err)
 				p.ProfileURL, profileServer = newTestServer(http.StatusOK, body)
+				p.ProxyRedeemURL, profileServerInternal = newTestServer(http.StatusOK, bodyInternal)
 			} else {
 				p.RedeemURL, profileServer = newCodeTestServer(400)
-				p.ProxyRedeemURL, redeemServer = newCodeTestServer(400)
+				p.ProxyRedeemURL, profileServerInternal = newCodeTestServer(500)
 			}
 			defer profileServer.Close()
+			defer profileServerInternal.Close()
 
+			p.ProxyProviderURL = p.ProviderURL
+			p.ProxyRedeemURL = p.RedeemURL
 			session, err := p.Redeem("http://redirect/", tc.Code)
 			if tc.RedeemResponse != nil {
 				testutil.Equal(t, nil, err)
@@ -270,6 +296,100 @@ func TestSSOProviderGetEmailAddress(t *testing.T) {
 				testutil.Equal(t, tc.RedeemResponse.Email, session.Email)
 				testutil.Equal(t, tc.RedeemResponse.AccessToken, session.AccessToken)
 				testutil.Equal(t, tc.RedeemResponse.RefreshToken, session.RefreshToken)
+			}
+			if tc.ExpectedError != "" && !strings.Contains(err.Error(), tc.ExpectedError) {
+				t.Errorf("got unexpected result.\nwant=%v\ngot=%v\n", tc.ExpectedError, err.Error())
+			}
+		})
+	}
+}
+
+func TestSSOProviderRedeemInternal(t *testing.T) {
+	testCases := []struct {
+		Name                    string
+		Code                    string
+		ExpectedError           string
+		RedeemResponse          *redeemResponse
+		RedeemResponseInternal  *redeemResponse
+		ProfileResponse         *profileResponse
+		ProfileResponseInternal *profileResponse
+	}{
+		{
+			Name:          "redeem fails without code",
+			ExpectedError: "missing code",
+		},
+		{
+			Name:          "redeem fails if redemption server not responding",
+			Code:          "code1234",
+			ExpectedError: "got 400",
+		},
+		{
+			Name: "redeem successful",
+			Code: "code1234",
+			RedeemResponse: &redeemResponse{
+				AccessToken:  "a1234",
+				ExpiresIn:    10,
+				RefreshToken: "refresh12345",
+				Email:        "michael.bland@gsa.gov",
+			},
+			RedeemResponseInternal: &redeemResponse{
+				AccessToken:  "i1234",
+				ExpiresIn:    10,
+				RefreshToken: "refreshinternal12345",
+				Email:        "michael.bland@gsa.gov",
+			},
+			ProfileResponse: &profileResponse{
+				Email:  "michael.bland@gsa.gov",
+				Groups: []string{"core@gsa.gov"},
+			},
+			ProfileResponseInternal: &profileResponse{
+				Email:  "michael.bland@gsa.gov",
+				Groups: []string{"internal@gsa.gov"},
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.Name, func(t *testing.T) {
+			p := newSSOProvider()
+
+			var redeemServer *httptest.Server
+			var redeemServerInternal *httptest.Server
+			// set up redemption resource
+			if tc.RedeemResponseInternal != nil {
+				body, err := json.Marshal(tc.RedeemResponse)
+				bodyInternal, err := json.Marshal(tc.RedeemResponseInternal)
+				testutil.Equal(t, nil, err)
+				p.RedeemURL, redeemServer = newTestServer(http.StatusOK, body)
+				p.ProxyRedeemURL, redeemServerInternal = newTestServer(http.StatusOK, bodyInternal)
+			} else {
+				p.RedeemURL, redeemServer = newCodeTestServer(500)
+				p.ProxyRedeemURL, redeemServerInternal = newCodeTestServer(400)
+			}
+			defer redeemServer.Close()
+			defer redeemServerInternal.Close()
+
+			var profileServer *httptest.Server
+			var profileServerInternal *httptest.Server
+			if tc.ProfileResponseInternal != nil {
+				body, err := json.Marshal(tc.ProfileResponse)
+				bodyInternal, err := json.Marshal(tc.ProfileResponseInternal)
+				testutil.Equal(t, nil, err)
+				p.ProfileURL, profileServer = newTestServer(http.StatusOK, body)
+				p.ProxyRedeemURL, profileServerInternal = newTestServer(http.StatusOK, bodyInternal)
+			} else {
+				p.RedeemURL, profileServer = newCodeTestServer(500)
+				p.ProxyRedeemURL, profileServerInternal = newCodeTestServer(400)
+			}
+			defer profileServer.Close()
+			defer profileServerInternal.Close()
+
+			session, err := p.Redeem("http://redirect/", tc.Code)
+			if tc.RedeemResponseInternal != nil {
+				testutil.Equal(t, nil, err)
+				testutil.NotEqual(t, session, nil)
+				testutil.Equal(t, tc.RedeemResponseInternal.Email, session.Email)
+				testutil.Equal(t, tc.RedeemResponseInternal.AccessToken, session.AccessToken)
+				testutil.Equal(t, tc.RedeemResponseInternal.RefreshToken, session.RefreshToken)
 			}
 			if tc.ExpectedError != "" && !strings.Contains(err.Error(), tc.ExpectedError) {
 				t.Errorf("got unexpected result.\nwant=%v\ngot=%v\n", tc.ExpectedError, err.Error())
