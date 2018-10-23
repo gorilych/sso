@@ -21,5 +21,6 @@ clean:
 	rm -r dist
 
 imagepush:
-	docker build -t buzzfeed/sso-dev:$(commit) .
-	docker push buzzfeed/sso-dev:$(commit)
+	docker build -t gorilych/sso:latest -t gorilych/sso:$(commit) .
+	docker push gorilych/sso:$(commit)
+	docker push gorilych/sso:latest
