@@ -32,15 +32,6 @@ type GoogleProvider struct {
 
 // NewGoogleProvider returns a new GoogleProvider and sets the provider url endpoints.
 func NewGoogleProvider(p *ProviderData, adminEmail, credsFilePath string) (*GoogleProvider, error) {
-	if adminEmail != "" || credsFilePath != "" {
-		if adminEmail == "" {
-			return nil, errors.New("missing setting: google-admin-email")
-		}
-		if credsFilePath == "" {
-			return nil, errors.New("missing setting: google-service-account-json")
-		}
-	}
-
 	p.ProviderName = "Google"
 	if p.SignInURL.String() == "" {
 		p.SignInURL = &url.URL{Scheme: "https",
